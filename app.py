@@ -1,99 +1,63 @@
-from flask import (
-    Flask,
-    render_template,
-    request,
-    redirect,
-    flash,
-    url_for,
-    current_app
-)
-import urllib.request 
-from urllib.parse import urlparse,urljoin
-from bs4 import BeautifulSoup
-import requests,validators,uuid,pathlib,os
-
+from flask import Flask, request, jsonify
+import os
+import subprocess
 
 app = Flask(__name__)
-app.secret_key = "secret-key"
 
 
-def image_handler(tag,specific_element,requested_url):
-    image_paths = []
+UPLOAD_FOLDER = "uploads"
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-    if tag == 'img':
-        images = [img['src'] for img in specific_element]
-        for i in specific_element:
-            image_path = i.attrs['src']
-            valid_imgpath = validators.url(image_path)
-            if valid_imgpath == True:
-                full_path = image_path
-            else:
-                full_path = urljoin(requested_url, image_path)
-                image_paths.append(full_path)
-
-    return image_paths
+def get_audio_info(audio_file_path):
     
-
-@app.route("/",methods=("GET", "POST"), strict_slashes=False)
-def index():
-    if request.method == "POST":
-
-        try:
-            global requested_url,specific_element,tag
-
-            requested_url = request.form.get('urltext')
-            tag = request.form.get('specificElement')
-
-            source = requests.get(requested_url).text
-            # parser library?
-            soup = BeautifulSoup(source, "html.parser")
-            
-            specific_element = soup.find_all(tag)
-            
-            counter = len(specific_element)
-
-            image_paths = image_handler(
-                tag,
-                specific_element,
-                requested_url
-                )
-
-            return render_template("index.html",
-                url = requested_url,
-                counter=counter,
-                image_paths=image_paths,
-                results = specific_element
-                )
-
-        except Exception as e:
-            flash(e, "danger")
-            
-    return render_template("index.html")
-
-
-@app.route("/download",methods=("GET", "POST"), strict_slashes=False)
-def downloader():
+    cmd = ["sox", "--i", audio_file_path]
     try:
-        for img in image_handler(tag,specific_element,requested_url):
-            image_url = img
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        output = result.stdout.strip().split("\n")
 
-            filename = str(uuid.uuid4())
-            file_ext = pathlib.Path(image_url).suffix
+        sample_rate, samples = None, None
 
-            picture_filename = filename + file_ext
+        for line in output:
+            if line.startswith("Sample Rate"):
+                sample_rate = float(line.split(":")[1].strip().split()[0])
+            elif line.startswith("Duration"):
+                duration_str = line.split("=")[1].strip()
+                samples = int(duration_str.split()[0])
+        samples /= sample_rate
+        return sample_rate, samples
 
-            downloads_path = str(pathlib.Path.home() / "Downloads")
+    except subprocess.CalledProcessError as e:
+        return None, None
 
-            picture_path  = os.path.join(downloads_path, picture_filename)
 
-            urllib.request.urlretrieve(image_url, picture_path)
 
-        flash("Images sucessfully downloaded", "success")
+@app.route("/upload", methods=["POST"])
+def upload_audio():
+    if "audio" not in request.files:
+        return jsonify({"error": "No file part"})
 
-    except Exception as e:
-        flash(e, "danger")
+    audio_file = request.files["audio"]
 
-    return redirect(url_for('index'))
+    if audio_file.filename == "":
+        return jsonify({"error": "No selected file"})
 
-    if __name__ == "__main__":
-        app.run(debug=False,host='0.0.0.0')
+    if audio_file:
+        if not os.path.exists(app.config["UPLOAD_FOLDER"]):
+            os.makedirs(app.config["UPLOAD_FOLDER"])
+
+        file_path = os.path.join(app.config["UPLOAD_FOLDER"], audio_file.filename)
+
+       
+        audio_file.save(file_path)
+
+        sample_rate, duration = get_audio_info(file_path)
+        print(sample_rate,duration)
+
+        if sample_rate is not None and duration is not None:
+            return jsonify({"message": "File uploaded successfully", "Sample Rate": sample_rate, "Duration": duration})
+        else:
+            return jsonify({"error": "Failed to get audio info"})
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
